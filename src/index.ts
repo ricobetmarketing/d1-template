@@ -7,93 +7,109 @@ function clamp(n: number, min: number, max: number) {
 
 export default {
   async fetch(request: Request, env: any) {
-    const urlObj = new URL(request.url);
+    const u = new URL(request.url);
 
-    // Default target (change if you want)
-    const targetUrl =
-      urlObj.searchParams.get("url") ||
-      "https://decevent.pages.dev/";
+    const targetUrl = u.searchParams.get("url") || "https://decevent.pages.dev/";
+    const mode = (u.searchParams.get("mode") || "leaderboard").toLowerCase();
+    const debug = u.searchParams.get("debug") === "1";
 
-    // Optional: choose what to capture
-    //  - mode=leaderboard (default): only section.leaderboard-card
-    //  - mode=full: full page screenshot
-    const mode = (urlObj.searchParams.get("mode") || "leaderboard").toLowerCase();
+    const width = clamp(Number(u.searchParams.get("w") || 1200), 320, 2400);
+    const height = clamp(Number(u.searchParams.get("h") || 800), 320, 4000);
 
-    // Screenshot size (you can override with ?w=1200&h=630)
-    const width = clamp(Number(urlObj.searchParams.get("w") || 1200), 320, 2400);
-    const height = clamp(Number(urlObj.searchParams.get("h") || 800), 320, 4000);
+    let browser: any;
 
-    const browser = await puppeteer.launch(env.BROWSER);
-    const page = await browser.newPage();
+    try {
+      browser = await puppeteer.launch(env.BROWSER);
+      const page = await browser.newPage();
 
-    // Make sure backgrounds are rendered (important for dark UI)
-    await page.emulateMediaType("screen");
+      // Helps some sites render more consistently
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+      );
 
-    await page.setViewport({
-      width,
-      height,
-      deviceScaleFactor: 1,
-    });
+      await page.emulateMediaType("screen");
 
-    // Load the page
-    await page.goto(targetUrl, { waitUntil: "networkidle0" });
+      await page.setViewport({ width, height, deviceScaleFactor: 1 });
 
-    // Give time for animations/data rendering (snowflakes / timers / dynamic list)
-    await page.waitForTimeout(1200);
+      await page.goto(targetUrl, { waitUntil: "networkidle0" });
 
-    // OPTIONAL: stop CSS animations so screenshot looks stable
-    await page.addStyleTag({
-      content: `
-        *, *::before, *::after { 
-          animation: none !important; 
-          transition: none !important; 
-          caret-color: transparent !important;
-        }
-      `,
-    });
+      // Give SPA / animations / data time to render
+      await page.waitForTimeout(1500);
 
-    // If you only want the leaderboard section
-    if (mode === "leaderboard") {
-      // This selector matches your leaderboard section in the screenshot:
-      // <section class="leaderboard-card">...</section>
-      const el = await page.waitForSelector("section.leaderboard-card", {
-        timeout: 15000,
+      // Optional: freeze animations so screenshot is stable
+      await page.addStyleTag({
+        content: `
+          *, *::before, *::after {
+            animation: none !important;
+            transition: none !important;
+          }
+        `,
       });
 
-      if (!el) {
+      // FULL PAGE MODE (debug-friendly)
+      if (mode === "full") {
+        const png = (await page.screenshot({ type: "png", fullPage: true })) as Uint8Array;
         await browser.close();
-        return new Response(
-          "Could not find section.leaderboard-card on the page",
-          { status: 500 }
-        );
+        return new Response(png, {
+          headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
+        });
       }
 
-      // Screenshot only that element (no top banner/header)
-      const png = (await el.screenshot({ type: "png" })) as Uint8Array;
+      // LEADERBOARD MODE (element screenshot)
+      // Try a few selectors (because Pages.dev and GitHub pages might differ slightly)
+      const selectors = [
+        "section.leaderboard-card",
+        ".leaderboard-card",
+        ".leaderboard-body",
+        "#rankingList",
+      ];
 
+      let el: any = null;
+      for (const sel of selectors) {
+        el = await page.$(sel);
+        if (el) break;
+      }
+
+      // If not found, return a full-page screenshot + helpful error (instead of 1101)
+      if (!el) {
+        const png = (await page.screenshot({ type: "png", fullPage: true })) as Uint8Array;
+        await browser.close();
+
+        if (!debug) {
+          return new Response(
+            "Leaderboard element not found. Try ?debug=1 or ?mode=full",
+            { status: 500, headers: { "Content-Type": "text/plain" } }
+          );
+        }
+
+        // Debug mode: return screenshot as PNG still, but with a header hint
+        return new Response(png, {
+          headers: {
+            "Content-Type": "image/png",
+            "X-Debug": "Leaderboard selector not found. Inspect DOM and set correct selector.",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      const png = (await el.screenshot({ type: "png" })) as Uint8Array;
       await browser.close();
 
       return new Response(png, {
-        headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "no-store",
-        },
+        headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
       });
+    } catch (err: any) {
+      try {
+        if (browser) await browser.close();
+      } catch {}
+
+      const msg =
+        (err && (err.stack || err.message)) || "Unknown error";
+
+      return new Response(
+        `Worker error while screenshotting:\n${msg}\n\nTarget: ${targetUrl}\nMode: ${mode}`,
+        { status: 500, headers: { "Content-Type": "text/plain" } }
+      );
     }
-
-    // Otherwise full page screenshot
-    const png = (await page.screenshot({
-      type: "png",
-      fullPage: true,
-    })) as Uint8Array;
-
-    await browser.close();
-
-    return new Response(png, {
-      headers: {
-        "Content-Type": "image/png",
-        "Cache-Control": "no-store",
-      },
-    });
   },
 } satisfies ExportedHandler;
