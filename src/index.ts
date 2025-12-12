@@ -8,6 +8,15 @@ function clamp(n: number, min: number, max: number) {
 export default {
   async fetch(request: Request, env: any) {
     const u = new URL(request.url);
+// Prevent browsers from triggering extra screenshot jobs (favicon, etc.)
+if (u.pathname === "/favicon.ico") {
+  return new Response(null, { status: 204 });
+}
+
+// Optional: simple health check endpoint
+if (u.pathname === "/health") {
+  return new Response("ok", { status: 200 });
+}
 
     const targetUrl = u.searchParams.get("url") || "https://decevent.pages.dev/";
     const mode = (u.searchParams.get("mode") || "leaderboard").toLowerCase();
